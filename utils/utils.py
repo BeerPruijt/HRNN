@@ -3,6 +3,7 @@ from sklearn.model_selection import train_test_split
 import torch
 from torch.utils.data import TensorDataset, Subset
 import numpy as np
+import pandas as pd
 
 def preprocess_data(df):
 
@@ -110,3 +111,86 @@ def construct_GRU_input(df):
     index_mapping = remaining_indices[sequence_length:]
 
     return dataset, scaler, index_mapping
+
+
+def transform_data(data, log_transform=False, diff=False, seasonal_diff=False, seasonal_lag=12):
+    """
+    Apply log transformation, regular differencing, and/or seasonal differencing to the data.
+
+    Parameters:
+    data (Pandas Series): The time series data with a datetime index and 'MS' frequency.
+    log_transform (bool): Apply log transformation if True.
+    diff (bool): Apply regular differencing if True.
+    seasonal_diff (bool): Apply seasonal differencing if True.
+    seasonal_lag (int): The lag for seasonal differencing.
+
+    Returns:
+    Pandas Series: Transformed data.
+    """
+    if not isinstance(data, pd.Series) or not pd.infer_freq(data.index) == 'MS':
+        raise ValueError("Data must be a Pandas Series with a datetime index and 'MS' frequency.")
+
+    if log_transform:
+        data = np.log(data)
+
+    if diff:
+        data = data.diff().dropna()
+
+    if seasonal_diff:
+        data = data.diff(periods=seasonal_lag).dropna()
+
+    return data
+
+def inverse_transform_data(forecasted_data, initial_value=None, log_transform=False, diff=False, seasonal_diff=False, seasonal_lag=12, additional_data=None):
+    """
+    Reverse log transformation, regular differencing, and/or seasonal differencing.
+
+    Parameters:
+    forecasted_data (Pandas Series): The forecasted data after transformations.
+    initial_value (float): The initial value of the original series before differencing.
+    log_transform (bool): Indicates if log transformation was applied.
+    diff (bool): Indicates if regular differencing was applied.
+    seasonal_diff (bool): Indicates if seasonal differencing was applied.
+    seasonal_lag (int): The lag used for seasonal differencing.
+    additional_data (Pandas Series): Additional data needed for reversing seasonal differencing.
+
+    Returns:
+    Pandas Series: Data after reversing transformations.
+    """
+    if not isinstance(forecasted_data, pd.Series) or not pd.infer_freq(forecasted_data.index) == 'MS':
+        raise ValueError("Data must be a Pandas Series with a datetime index and 'MS' frequency.")
+    
+    if seasonal_diff:
+        if not isinstance(additional_data, pd.Series) or len(additional_data) < seasonal_lag:
+            raise ValueError("Additional data must be a Pandas Series with length at least equal to the seasonal lag.")
+
+        # Check if all required indices are present in additional_data
+        required_indices = pd.date_range(start=forecasted_data.index[0] - pd.DateOffset(months=seasonal_lag), 
+                                         periods=seasonal_lag, 
+                                         freq='MS')
+        
+        missing_indices = [idx for idx in required_indices if idx not in additional_data.index]
+        if missing_indices:
+            missing_indices_str = ', '.join(str(idx.date()) for idx in missing_indices)
+            raise ValueError(f"Additional data is missing the following required indices for seasonal differencing reversal: {missing_indices_str}")
+
+        # Reconstruct the data for seasonal differencing
+        for idx in forecasted_data.index:
+            base_idx = idx-pd.DateOffset(months=seasonal_lag)
+            if base_idx < forecasted_data.index[0]:
+                forecasted_data.loc[idx] += additional_data.loc[base_idx]
+            else:
+                forecasted_data.loc[idx] += forecasted_data.loc[base_idx]
+
+    if diff and initial_value is not None:
+        # Add the initial value to the start of the series
+        forecasted_data = pd.concat([pd.Series([initial_value], index=[forecasted_data.index[0] - pd.Timedelta(1, unit='MS')]), forecasted_data]).cumsum()
+
+    if log_transform:
+        # Reverse log transformation
+        forecasted_data = np.exp(forecasted_data)
+
+    return forecasted_data
+
+
+
