@@ -6,6 +6,9 @@ __pycache__/
 # Data
 *.xlsx
 
+# Results
+/results
+
 # C extensions
 *.so
 

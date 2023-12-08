@@ -4,8 +4,9 @@ import pandas as pd
 from statsmodels.tsa.ar_model import AutoReg, AutoRegResultsWrapper
 from pandas.tseries.offsets import MonthBegin
 from statsmodels.tools.sm_exceptions import MissingDataError
+from sklearn.metrics import mean_squared_error
 
-from benchmarks.ar import fit_ar_model, predict_with_model
+from benchmarks.arma import fit_ar_model, predict_with_model, define_rw_model, define_ar_model, define_ma_model
 
 # Create a simple time series with a known pattern
 @pytest.fixture
@@ -44,6 +45,14 @@ def model_and_prediction(dummy_time_series_data):
     model_fit = fit_ar_model(dummy_time_series_data, lag)
     prediction = predict_with_model(model_fit, len(dummy_time_series_data), steps_ahead)
     return prediction
+
+# Fixture to create the dummy time series data
+@pytest.fixture
+def dummy_rw_data():
+    # Generate a pandas Series with a datetime index and increasing values
+    date_range = pd.date_range(start='2018-01-01', periods=60, freq='MS')
+    series_data = pd.Series(range(60), index=date_range)
+    return series_data
 
 # Check if the model is an instance of the correct class
 def test_fit_ar_model_class(dummy_time_series_data):
@@ -85,6 +94,77 @@ def test_prediction_spans_correct_range(dummy_time_series_data, model_and_predic
 
 # Check if an error is raised when fitting the model with NaN values
 def test_fit_ar_model_with_nan(dummy_time_series_data):
-    dummy_time_series_data[10] = np.nan  # Introduce a NaN value
+    dummy_time_series_data.iloc[10] = np.nan  # Introduce a NaN value
     with pytest.raises(MissingDataError):
         fit_ar_model(dummy_time_series_data, lag=5)
+
+# Test to check the forecasted values and the index of the returned series
+def test_rw_model(dummy_rw_data):
+    # Define the lag and horizon
+    lag = 1
+    horizon = 3
+
+    # Define the model using the closure
+    rw_model = define_rw_model(lag)
+    
+    # Perform the forecasting
+    forecasted_values = rw_model(dummy_rw_data, horizon)
+    
+    # Check if the forecasted values are a pandas Series
+    assert isinstance(forecasted_values, pd.Series), "The forecast should return a pandas Series"
+    
+    # Check if the forecast spans the three months after the last month in the data
+    expected_start_date = dummy_rw_data.index[-1] + pd.DateOffset(months=1)
+    expected_dates = pd.date_range(start=expected_start_date, periods=horizon, freq='MS')
+    pd.testing.assert_index_equal(forecasted_values.index, expected_dates), \
+    "The forecast index should span the three months after the last month in the data"
+    
+    # Check if the forecasted values increase by 0 in every timestep
+    assert (forecasted_values.diff().dropna() == 0).all(), \
+    "The forecasted values of the RW(1) should increase by zero in every timestep"
+
+# Test to check the RMSE of the forecasted values resulting from the forecasts is correct
+def test_rw_rmse(dummy_rw_data):
+    # Define the lag and horizon
+    lag = 1
+    horizon = 3
+
+    # Define the model using the closure
+    rw_model = define_rw_model(lag)
+    
+    # Perform the forecasting
+    forecasted_values = rw_model(dummy_rw_data[0:-3], horizon)
+    
+    # Define the target and the expected RMSE
+    true_values = dummy_rw_data.tail(horizon)
+    expected_rmse = (1 + 4 + 9)/3 # mean(1^2 + 2^2 + 3^2)
+
+    # Check if the indices are as expected
+    assert (true_values.index == forecasted_values.index).all(), "The indices of the forecasting and the true values don't match"
+    
+    assert mean_squared_error(true_values, forecasted_values) == expected_rmse, "The random walk doens't yield the expected RMSE"
+
+# Test to check if all the basic benchmark models yield the same type of outputs
+def test_benchmark_forecast_types(dummy_rw_data):
+    # Define the lag and horizon
+    lag = 1
+    horizon = 3
+
+    # Define the model using the closure
+    rw_model = define_rw_model(lag)
+    ar_model = define_ar_model(lag)
+    ma_model = define_ma_model(lag)
+
+    # Perform the forecasting
+    forecasts_rw = rw_model(dummy_rw_data[0:-3], horizon)
+    forecasts_ar = rw_model(dummy_rw_data[0:-3], horizon)
+    forecasts_ma = rw_model(dummy_rw_data[0:-3], horizon)
+    
+    # Check if all objects are pandas Series
+    assert isinstance(forecasts_rw, pd.Series), "Forecasts of RW is not a pandas Series"
+    assert isinstance(forecasts_ar, pd.Series), "Forecasts of AR not a pandas Series"
+    assert isinstance(forecasts_ma, pd.Series), "Forecasts of MA not a pandas Series"
+
+    # Compare indices
+    assert forecasts_rw.index.equals(forecasts_ar.index), "Indices of RW and AR do not match"
+    assert forecasts_rw.index.equals(forecasts_ma.index), "Indices of RW and MA do not match"

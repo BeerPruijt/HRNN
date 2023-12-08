@@ -139,7 +139,7 @@ def transform_data(data, log_transform=False, diff=False, seasonal_diff=False, s
     if seasonal_diff:
         data = data.diff(periods=seasonal_lag).dropna()
 
-    return data
+    return data.asfreq('MS')
 
 def inverse_transform_data(forecasted_data, initial_value=None, log_transform=False, diff=False, seasonal_diff=False, seasonal_lag=12, additional_data=None):
     """
