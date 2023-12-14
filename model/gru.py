@@ -7,6 +7,7 @@ from tensorflow.keras.callbacks import EarlyStopping
 from sklearn.preprocessing import MinMaxScaler
 
 def define_gru_model(sequence_length):
+    
     def revert_growth_rates_to_levels(last_level, growth_rates):
         levels = [last_level]
         for growth_rate in growth_rates:

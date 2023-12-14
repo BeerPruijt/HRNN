@@ -72,7 +72,7 @@ def define_ar_model(lag, log_transform=False, diff=False, seasonal_diff=False, s
         forecast = predict_with_model(model_fit, start, horizon)
 
         # Reverse transformations on forecasted data
-        initial_value = data.iloc[-seasonal_lag] if seasonal_diff else None
+        initial_value = data.iloc[-seasonal_lag] if seasonal_diff else data.iloc[-1]
         forecast = inverse_transform_data(forecast, initial_value=initial_value, log_transform=log_transform, diff=diff, seasonal_diff=seasonal_diff, seasonal_lag=seasonal_lag, additional_data=data)
 
         return forecast

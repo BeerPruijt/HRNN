@@ -141,56 +141,24 @@ def transform_data(data, log_transform=False, diff=False, seasonal_diff=False, s
 
     return data.asfreq('MS')
 
-def inverse_transform_data(forecasted_data, initial_value=None, log_transform=False, diff=False, seasonal_diff=False, seasonal_lag=12, additional_data=None):
-    """
-    Reverse log transformation, regular differencing, and/or seasonal differencing.
-
-    Parameters:
-    forecasted_data (Pandas Series): The forecasted data after transformations.
+def inverse_transform_data(forecasted_data, initial_value=None, diff=False, log_transform=False, seasonal_diff=False, seasonal_lag=12, additional_data=None):
+    """Parameters:
+    forecasted_data (numpy.ndarray): The forecasted data after transformations.
     initial_value (float): The initial value of the original series before differencing.
+    diff (bool): Indicates if differencing was applied.
     log_transform (bool): Indicates if log transformation was applied.
-    diff (bool): Indicates if regular differencing was applied.
     seasonal_diff (bool): Indicates if seasonal differencing was applied.
-    seasonal_lag (int): The lag used for seasonal differencing.
-    additional_data (Pandas Series): Additional data needed for reversing seasonal differencing.
 
     Returns:
-    Pandas Series: Data after reversing transformations.
+    numpy.ndarray: Data after reversing the transformations.
     """
-    if not isinstance(forecasted_data, pd.Series) or not pd.infer_freq(forecasted_data.index) == 'MS':
-        raise ValueError("Data must be a Pandas Series with a datetime index and 'MS' frequency.")
-    
     if seasonal_diff:
-        if not isinstance(additional_data, pd.Series) or len(additional_data) < seasonal_lag:
-            raise ValueError("Additional data must be a Pandas Series with length at least equal to the seasonal lag.")
-
-        # Check if all required indices are present in additional_data
-        required_indices = pd.date_range(start=forecasted_data.index[0] - pd.DateOffset(months=seasonal_lag), 
-                                         periods=seasonal_lag, 
-                                         freq='MS')
-        
-        missing_indices = [idx for idx in required_indices if idx not in additional_data.index]
-        if missing_indices:
-            missing_indices_str = ', '.join(str(idx.date()) for idx in missing_indices)
-            raise ValueError(f"Additional data is missing the following required indices for seasonal differencing reversal: {missing_indices_str}")
-
-        # Reconstruct the data for seasonal differencing
-        for idx in forecasted_data.index:
-            base_idx = idx-pd.DateOffset(months=seasonal_lag)
-            if base_idx < forecasted_data.index[0]:
-                forecasted_data.loc[idx] += additional_data.loc[base_idx]
-            else:
-                forecasted_data.loc[idx] += forecasted_data.loc[base_idx]
-
-    if diff and initial_value is not None:
-        # Add the initial value to the start of the series
-        forecasted_data = pd.concat([pd.Series([initial_value], index=[forecasted_data.index[0] - pd.Timedelta(1, unit='MS')]), forecasted_data]).cumsum()
-
-    if log_transform:
-        # Reverse log transformation
-        forecasted_data = np.exp(forecasted_data)
-
-    return forecasted_data
-
-
+        raise NotImplementedError("Seasonal differencing is not yet supported.")
+    
+    if diff and log_transform and initial_value is not None:
+        output_data = initial_value*np.exp(np.cumsum(forecasted_data))
+    else:
+        raise NotImplementedError("Only log_diff reversal is supported.")
+    
+    return output_data
 

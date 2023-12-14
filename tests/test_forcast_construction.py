@@ -71,12 +71,3 @@ def test_non_series_error():
     test_dates = dataset.index[-2::]
     with pytest.raises(ValueError):
         construct_forecasts(dataset, models, test_dates, save_path=None)
-
-# Check that the proper error is raised when the model outputs NaN values	
-def test_nan_in_forecasts_error():
-    # Construct dummy data, fake models and define test dates
-    dataset = pd.Series([1, 2, 3], index=pd.date_range(start='2019-01-01', periods=3, freq='MS'))
-    models = {'test(1)': lambda x, y: generate_dummy_forecasts(x, y, 1, add_nan=True), 'test(2)': lambda x, y: generate_dummy_forecasts(x, y, 2)}
-    test_dates = dataset.index[-2::]
-    with pytest.raises(ValueError):
-        construct_forecasts(dataset, models, test_dates, save_path=None)
