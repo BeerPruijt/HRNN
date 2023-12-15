@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import TensorDataset, DataLoader
+from sklearn.model_selection import train_test_split
 
 class GRUNet(nn.Module):
     def __init__(self, input_size, hidden_size, output_dim, num_layers=1, drop_prob=0):
@@ -87,13 +88,17 @@ def log_diff(data, diff_order=1):
     """Calculate the log difference of a pandas Series."""
     return np.log(data).diff(diff_order).dropna() * 100
 
-def load_data(X, y, batch_size, shuffle=False):
-    """Converts data to PyTorch tensors and creates a DataLoader."""
-    X_train = torch.from_numpy(X).float().view(-1, X.shape[1], 1)  # -1 for automatic batch size adjustment
-    y_train = torch.from_numpy(y).float()
-    train_data = TensorDataset(X_train, y_train)
-    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=shuffle)
-    return train_loader
+def construct_dataloader(X, y, batch_size, shuffle=False):
+    """Convert the data to dataloaders, which can generate batches of the data for training and testing."""
+    # Convert data to PyTorch tensors (numpy arrays but with additional functionality)
+    X = torch.from_numpy(X).float().view(-1, X.shape[1], 1)
+    y = torch.from_numpy(y).float()
+
+    # Create DataLoader objects for training and testing data
+    data = TensorDataset(X, y)
+    loader = DataLoader(data, batch_size=batch_size, shuffle=shuffle)  
+
+    return loader
 
 def initialize_model(input_size, hidden_size, output_dim, num_layers, drop_prob):
     """Initializes the model, loss function, and optimizer."""
@@ -102,31 +107,107 @@ def initialize_model(input_size, hidden_size, output_dim, num_layers, drop_prob)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
     return model, loss_fn, optimizer
 
-def train_model(model, train_loader, loss_fn, optimizer, device, num_epochs):
-    """Training loop for the model, returns the trained model and loss history."""
-    loss_history = []
+def train_model_with_early_stopping(model, train_loader, val_loader, loss_fn, optimizer, device, num_epochs, patience, verbose=True):
+    """
+    Training loop for the model with early stopping.
+    
+    Args:
+        model (nn.Module): The neural network model to train.
+        train_loader (DataLoader): DataLoader for the training dataset.
+        val_loader (DataLoader): DataLoader for the validation dataset.
+        loss_fn: The loss function to optimize.
+        optimizer: The optimizer for model parameter updates.
+        device (str): Device to run the model on ('cpu' or 'cuda').
+        num_epochs (int): Maximum number of training epochs.
+        patience (int): Number of consecutive epochs with no validation loss improvement to trigger early stopping.
+
+    Returns:
+        model (nn.Module): The trained model.
+        loss_history (list): List of average training losses for each epoch.
+    """
+    # Initialize the loss history, best validation loss, and the number of consecutive epochs with no improvement in validation loss
+    loss_history_training = []
+    loss_history_validation = []
+    best_val_loss = np.inf
+    consecutive_no_improvement = 0
+    best_model = None
 
     for epoch in range(num_epochs):
-        model.train()
-        total_loss = 0
+        # Training loss (use train loader and enable backpropagation of the gradients)
+        train_loss = evaluate_model(model, train_loader, loss_fn, optimizer, device, enable_backpropagation=True)
+        loss_history_training.append(train_loss)
 
-        for X_batch, y_batch in train_loader:
+        # Validation loss (use validation loader and disable backpropagation of the gradients)
+        val_loss = evaluate_model(model, val_loader, loss_fn, optimizer, device, enable_backpropagation=False)
+        loss_history_validation.append(val_loss)
+
+        if verbose:
+            print(f'Epoch {epoch + 1}/{num_epochs}, Loss: {train_loss:.4f}')
+            print(f'Validation Loss: {val_loss:.4f}')
+            print(f'Best Validation Loss: {best_val_loss:.4f}')
+
+        # Early stopping check
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            consecutive_no_improvement = 0
+            # Update the best model
+            best_model = model.state_dict()
+        else:
+            consecutive_no_improvement += 1
+
+        if consecutive_no_improvement >= patience:
+            if verbose:
+                print(f'Early stopping at epoch {epoch + 1} as validation loss has not improved for {patience} consecutive epochs.')
+            break
+
+    # Load the best model state
+    if best_model is not None:
+        model.load_state_dict(best_model)
+            
+    loss_history = {'training': loss_history_training, 'validation': loss_history_validation}
+
+    return model, loss_history
+
+def evaluate_model(model, data_loader, loss_fn, optimizer, device, enable_backpropagation=True):
+    """
+    Training or evaluation loop to calculate loss on a dataset (training is when backpropagation is applied when evaluating).
+    
+    Args:
+        model (nn.Module): The neural network model to train or evaluate.
+        data_loader (DataLoader): DataLoader for the dataset.
+        loss_fn: The loss function used for training or evaluation.
+        optimizer: The optimizer for model parameter updates (only used if enable_backpropagation=True).
+        device (str): Device to run the model on ('cpu' or 'cuda').
+        enable_backpropagation (bool): Whether to enable gradient computation and parameter updates.
+
+    Returns:
+        avg_loss (float): Average loss on the dataset.
+    """
+    model.train() if enable_backpropagation else model.eval()
+    total_loss = 0
+
+    # Enable or disable gradient calculation based on the 'enable_backpropagation' flag
+    with torch.set_grad_enabled(enable_backpropagation):
+        for X_batch, y_batch in data_loader:
+            # Initialize hidden state and move to device
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
             h = model.init_hidden(X_batch.size(0), device)
 
-            optimizer.zero_grad()
+            # Calculate loss for the batch            
             output, h = model(X_batch, h)
             loss = loss_fn(output, y_batch)
-            loss.backward()
-            optimizer.step()
 
+            # Backpropagation and parameter updates only if training is enabled
+            if enable_backpropagation:
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+
+            # Accumulate the loss
             total_loss += loss.item()
 
-        avg_loss = total_loss / len(train_loader)
-        loss_history.append(avg_loss)
-        print(f'Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.4f}')
-    
-    return model, loss_history
+    avg_loss = total_loss / len(data_loader)
+    return avg_loss
 
 def recursive_forecast(model, initial_sequence, forecast_horizon, device):
     """
@@ -187,28 +268,32 @@ def convert_forecasts_to_series(original_series, forecasts):
 
     return forecast_series
 
-def forecast_using_gru(input_series, forecast_horizon, batch_size=50, num_layers=2, num_epochs=200, hidden_size=10, seq_length=4, diff_order=1):
+def forecast_using_gru(input_series, forecast_horizon, batch_size=50, num_layers=2, num_epochs=10000, hidden_size=10, seq_length=4, diff_order=1, patience=10, random_state=None, validation_size=0.3, drop_prob=0.0, verbose=True):
 
     # Data Preparation
     data = log_diff(input_series, diff_order)
     X, y = create_sequence_target_pairs(data, seq_length)
 
-    # Data Loading
-    train_loader = load_data(X, y, batch_size)
+    # Split the data into training and validation sets (the validation set is used for the early stopping mechanism)
+    X_train, X_validation, y_train, y_validation = train_test_split(X, y, test_size=validation_size, shuffle=False, random_state=random_state)
+
+    # Format the data as loaders
+    train_loader = construct_dataloader(X_train, y_train, batch_size, shuffle=False)
+    validation_loader = construct_dataloader(X_validation, y_validation, batch_size, shuffle=False)
 
     # Model Initialization
     model, loss_fn, optimizer = initialize_model(input_size=1, 
                                                  hidden_size=hidden_size, 
                                                  output_dim=1, 
                                                  num_layers=num_layers, 
-                                                 drop_prob=0.2)
+                                                 drop_prob=drop_prob)
 
     # Set device for training
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
     # Training
-    model, loss_history = train_model(model, train_loader, loss_fn, optimizer, device, num_epochs)
+    model, loss_history = train_model_with_early_stopping(model, train_loader, validation_loader, loss_fn, optimizer, device, num_epochs, patience, verbose=verbose)
 
     # Forecasting X[-1] is the last sequence in the training set which we use to initialize the forecasting process
     forecast_values = recursive_forecast(model, X[-1], forecast_horizon, device)
