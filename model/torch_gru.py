@@ -5,6 +5,7 @@ import torch
 from torch import nn
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
 
 class GRUNet(nn.Module):
     def __init__(self, input_size, hidden_size, output_dim, num_layers=1, drop_prob=0):
@@ -100,18 +101,30 @@ def construct_dataloader(X, y, batch_size, shuffle=False):
 
     return loader
 
+def mse_with_l2_loss(outputs, targets, model, l2_lambda=0.0):
+    """Computes the MSE loss with optional L2 regularization."""
+    # Standard loss (e.g., MSE)
+    loss = torch.nn.MSELoss()(outputs, targets)
+    
+    # L2 regularization term
+    l2_reg = torch.tensor(0.).to(targets.device)
+    for param in model.parameters():
+        l2_reg += torch.norm(param)
+    loss += l2_lambda * l2_reg
+    
+    return loss
+
 def initialize_model(input_size, hidden_size, output_dim, num_layers, drop_prob):
     """Initializes the model, loss function, and optimizer."""
     model = GRUNet(input_size, hidden_size, output_dim, num_layers, drop_prob)
-    loss_fn = torch.nn.MSELoss()
+    loss_fn = mse_with_l2_loss
     optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
     return model, loss_fn, optimizer
 
-def train_model_with_early_stopping(model, train_loader, val_loader, loss_fn, optimizer, device, num_epochs, patience, verbose=True):
+def train_model_with_early_stopping(model, train_loader, val_loader, loss_fn, optimizer, device, num_epochs, patience, gradient_clipping_threshold=1.0, l2_lambda=0.0, verbose=True):
     """
     Training loop for the model with early stopping.
     
-    Args:
         model (nn.Module): The neural network model to train.
         train_loader (DataLoader): DataLoader for the training dataset.
         val_loader (DataLoader): DataLoader for the validation dataset.
@@ -134,11 +147,11 @@ def train_model_with_early_stopping(model, train_loader, val_loader, loss_fn, op
 
     for epoch in range(num_epochs):
         # Training loss (use train loader and enable backpropagation of the gradients)
-        train_loss = evaluate_model(model, train_loader, loss_fn, optimizer, device, enable_backpropagation=True)
+        train_loss = evaluate_model(model, train_loader, loss_fn, optimizer, device, enable_backpropagation=True, gradient_clipping_threshold=gradient_clipping_threshold, l2_lambda=l2_lambda)
         loss_history_training.append(train_loss)
 
-        # Validation loss (use validation loader and disable backpropagation of the gradients)
-        val_loss = evaluate_model(model, val_loader, loss_fn, optimizer, device, enable_backpropagation=False)
+        # Validation loss (use validation loader and disable backpropagation of the gradients), we also disable L2 regularization (i.e. simply evaluate the model based on MSE loss)
+        val_loss = evaluate_model(model, val_loader, loss_fn, optimizer, device, enable_backpropagation=False, gradient_clipping_threshold=gradient_clipping_threshold, l2_lambda=0.0)
         loss_history_validation.append(val_loss)
 
         if verbose:
@@ -168,7 +181,7 @@ def train_model_with_early_stopping(model, train_loader, val_loader, loss_fn, op
 
     return model, loss_history
 
-def evaluate_model(model, data_loader, loss_fn, optimizer, device, enable_backpropagation=True):
+def evaluate_model(model, data_loader, loss_fn, optimizer, device, enable_backpropagation=True, gradient_clipping_threshold=1.0, l2_lambda=0.0):
     """
     Training or evaluation loop to calculate loss on a dataset (training is when backpropagation is applied when evaluating).
     
@@ -195,13 +208,18 @@ def evaluate_model(model, data_loader, loss_fn, optimizer, device, enable_backpr
 
             # Calculate loss for the batch            
             output, h = model(X_batch, h)
-            loss = loss_fn(output, y_batch)
+            loss = loss_fn(output, y_batch, model, l2_lambda=l2_lambda)
 
             # Backpropagation and parameter updates only if training is enabled
             if enable_backpropagation:
-                loss.backward()
-                optimizer.step()
+                # Clear the gradients otherwise they accumulate from step to step
                 optimizer.zero_grad()
+                # After computing the forward pass and caluclating the loss, calculates parameter gradients w.r.t. the loss
+                loss.backward()
+                # Limit the norm of the gradients to prevent numerical instability (i.e. exploding gradients)
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=gradient_clipping_threshold)
+                # Update the parameters using the clipped gradients
+                optimizer.step()
 
             # Accumulate the loss
             total_loss += loss.item()
@@ -268,14 +286,18 @@ def convert_forecasts_to_series(original_series, forecasts):
 
     return forecast_series
 
-def forecast_using_gru(input_series, forecast_horizon, batch_size=50, num_layers=2, num_epochs=10000, hidden_size=10, seq_length=4, diff_order=1, patience=10, random_state=None, validation_size=0.3, drop_prob=0.0, verbose=True):
+def forecast_using_gru(input_series, forecast_horizon, batch_size=50, num_layers=2, num_epochs=10000, hidden_size=10, seq_length=4, gradient_clipping_threshold=1.0, patience=10, random_state=None, validation_size=0.3, drop_prob=0.0, l2_lambda=0.0, verbose=True):
 
-    # Data Preparation
-    data = log_diff(input_series, diff_order)
+    data = input_series.copy()
+
+    # Scale data
+    scaler = MinMaxScaler()
+    data.loc[:] = scaler.fit_transform(data.values.reshape(-1, 1)).ravel()
+
     X, y = create_sequence_target_pairs(data, seq_length)
 
     # Split the data into training and validation sets (the validation set is used for the early stopping mechanism)
-    X_train, X_validation, y_train, y_validation = train_test_split(X, y, test_size=validation_size, shuffle=False, random_state=random_state)
+    X_train, X_validation, y_train, y_validation = train_test_split(X, y, test_size=validation_size, shuffle=True, random_state=random_state)
 
     # Format the data as loaders
     train_loader = construct_dataloader(X_train, y_train, batch_size, shuffle=False)
@@ -293,12 +315,16 @@ def forecast_using_gru(input_series, forecast_horizon, batch_size=50, num_layers
     model = model.to(device)
 
     # Training
-    model, loss_history = train_model_with_early_stopping(model, train_loader, validation_loader, loss_fn, optimizer, device, num_epochs, patience, verbose=verbose)
+    model, loss_history = train_model_with_early_stopping(model, train_loader, validation_loader, loss_fn, optimizer, device, num_epochs, patience, gradient_clipping_threshold=gradient_clipping_threshold, l2_lambda=l2_lambda, verbose=verbose)
 
     # Forecasting X[-1] is the last sequence in the training set which we use to initialize the forecasting process
-    forecast_values = recursive_forecast(model, X[-1], forecast_horizon, device)
+    last_sequence_scaled = scaler.transform(X[-1].reshape(-1, 1)).ravel()
+    forecast_values = recursive_forecast(model, last_sequence_scaled, forecast_horizon, device)
 
     # Format as a series with datetime index
     forecasts_as_series = convert_forecasts_to_series(data, forecast_values)
+
+    # Inverse transform the forecasts
+    forecasts_as_series.loc[:] = scaler.inverse_transform(forecasts_as_series.values.reshape(-1, 1)).ravel()
 
     return forecasts_as_series, model, loss_history
