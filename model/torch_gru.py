@@ -297,7 +297,7 @@ def forecast_using_gru(input_series, forecast_horizon, batch_size=50, num_layers
     X, y = create_sequence_target_pairs(data, seq_length)
 
     # Split the data into training and validation sets (the validation set is used for the early stopping mechanism)
-    X_train, X_validation, y_train, y_validation = train_test_split(X, y, test_size=validation_size, shuffle=True, random_state=random_state)
+    X_train, X_validation, y_train, y_validation = train_test_split(X, y, test_size=validation_size, shuffle=False, random_state=random_state)
 
     # Format the data as loaders
     train_loader = construct_dataloader(X_train, y_train, batch_size, shuffle=False)
