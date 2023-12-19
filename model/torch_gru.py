@@ -37,27 +37,34 @@ class GRUNet(nn.Module):
         # Creates a ReLU activation function
         self.relu = nn.ReLU()
 
+        # Initialize hidden state
+        self.hidden = None
+
     # Forward pass: input x is processed through a GRU player and a fully connected layer?
-    def forward(self, x, h):
+    def forward(self, x, h=None):
+
+        # Initialize hidden state with zeros if it isn't already initialized
+        if h is not None:
+            self.hidden = h
+        elif self.hidden is None:
+            batch_size = x.size(0)
+            self.hidden = torch.zeros(self.num_layers, batch_size, self.hidden_size).to(x.device)
+        else:
+            # Detach hidden state from its history
+            self.hidden = self.hidden.detach()
+
         # Input x is processed through a GRU player
-        out, h = self.gru(x, h)
+        out, self.hidden = self.gru(x, self.hidden)
 
         # The output of the last time step is fed to the fully connected layer
         out = self.fc(self.relu(out[:, -1]))
 
         # Return flattened (i.e. as 1 dimensional tensor) output and the updated hidden state
-        return out.flatten(), h
-
+        return out.flatten()
+    
     def init_hidden(self, batch_size, device):
-        # Retreive the weight tensor from the model parameters
-        weight = next(self.parameters()).data
-
-        # Initialize the hidden state with zeros and mark it as requiring gradient computation (necessary if you want to train it using backpropagation)
-        hidden = weight.new(self.num_layers, batch_size, self.hidden_size).zero_().requires_grad_().to(device)
-
-        # Set the hidden state using Kaiming normal initialization (mean=0, variance based on fan-out of the tensor)
-        nn.init.kaiming_normal_(hidden, a=0, mode='fan_out')
-        return hidden
+        """Initializes the hidden state of the GRU network."""
+        self.hidden = torch.zeros(self.num_layers, batch_size, self.hidden_size).to(device)
     
 def create_sequence_target_pairs(data, seq_length):
     """
@@ -121,7 +128,7 @@ def initialize_model(input_size, hidden_size, output_dim, num_layers, drop_prob)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
     return model, loss_fn, optimizer
 
-def train_model_with_early_stopping(model, train_loader, val_loader, loss_fn, optimizer, device, num_epochs, patience, gradient_clipping_threshold=1.0, l2_lambda=0.0, verbose=True):
+def train_model_with_early_stopping(model, train_loader, val_loader, loss_fn, optimizer, device, num_epochs, patience, gradient_clipping_threshold=1.0, l2_lambda=0.0, verbose=True, warm_up_loader=None):
     """
     Training loop for the model with early stopping.
     
@@ -147,11 +154,21 @@ def train_model_with_early_stopping(model, train_loader, val_loader, loss_fn, op
 
     for epoch in range(num_epochs):
         # Training loss (use train loader and enable backpropagation of the gradients)
-        train_loss = evaluate_model(model, train_loader, loss_fn, optimizer, device, enable_backpropagation=True, gradient_clipping_threshold=gradient_clipping_threshold, l2_lambda=l2_lambda)
+        train_loss = evaluate_model(model, 
+                                    train_loader, 
+                                    loss_fn, 
+                                    optimizer, 
+                                    device, 
+                                    enable_backpropagation=True, 
+                                    gradient_clipping_threshold=gradient_clipping_threshold, 
+                                    l2_lambda=l2_lambda, 
+                                    warm_up_loader=val_loader,
+                                    warm_up_start=0)
+        
         loss_history_training.append(train_loss)
 
         # Validation loss (use validation loader and disable backpropagation of the gradients), we also disable L2 regularization (i.e. simply evaluate the model based on MSE loss)
-        val_loss = evaluate_model(model, val_loader, loss_fn, optimizer, device, enable_backpropagation=False, gradient_clipping_threshold=gradient_clipping_threshold, l2_lambda=0.0)
+        val_loss = evaluate_model(model, val_loader, loss_fn, optimizer, device, enable_backpropagation=False, gradient_clipping_threshold=gradient_clipping_threshold, l2_lambda=0.0, warm_up_loader=warm_up_loader, warm_up_start=[sum(len(X_batch) for X_batch, _ in train_loader)])
         loss_history_validation.append(val_loss)
 
         if verbose:
@@ -181,7 +198,23 @@ def train_model_with_early_stopping(model, train_loader, val_loader, loss_fn, op
 
     return model, loss_history
 
-def evaluate_model(model, data_loader, loss_fn, optimizer, device, enable_backpropagation=True, gradient_clipping_threshold=1.0, l2_lambda=0.0):
+def warm_up_model_stateful(model, data_loader, device):
+    model.eval()
+    hidden_states = []
+
+    model.init_hidden(1, device)
+
+    for X_sample, _ in data_loader:
+        # Store the hidden state        
+        hidden_states.append(model.hidden)  
+
+        X_sample = X_sample.to(device)
+        # Forward pass without re-initializing hidden state
+        _ = model(X_sample)
+
+    return hidden_states
+
+def evaluate_model(model, data_loader, loss_fn, optimizer, device, enable_backpropagation=True, gradient_clipping_threshold=1.0, l2_lambda=0.0, warm_up_loader=None, warm_up_start=0):
     """
     Training or evaluation loop to calculate loss on a dataset (training is when backpropagation is applied when evaluating).
     
@@ -204,10 +237,17 @@ def evaluate_model(model, data_loader, loss_fn, optimizer, device, enable_backpr
         for X_batch, y_batch in data_loader:
             # Initialize hidden state and move to device
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-            h = model.init_hidden(X_batch.size(0), device)
+
+            if warm_up_loader is not None:
+                hidden_states = warm_up_model_stateful(model, warm_up_loader, device)
+                print(X_batch)
+                print(len(X_batch))
+                hidden_states = hidden_states[warm_up_start:(warm_up_start + len(X_batch))]
+                print(hidden_states)
+                warm_up_start += len(X_batch)
 
             # Calculate loss for the batch            
-            output, h = model(X_batch, h)
+            output = model(X_batch, hidden_states)
             loss = loss_fn(output, y_batch, model, l2_lambda=l2_lambda)
 
             # Backpropagation and parameter updates only if training is enabled
@@ -217,7 +257,7 @@ def evaluate_model(model, data_loader, loss_fn, optimizer, device, enable_backpr
                 # After computing the forward pass and caluclating the loss, calculates parameter gradients w.r.t. the loss
                 loss.backward()
                 # Limit the norm of the gradients to prevent numerical instability (i.e. exploding gradients)
-                nn.utils.clip_grad_norm_(model.parameters(), max_norm=gradient_clipping_threshold)
+                #nn.utils.clip_grad_norm_(model.parameters(), max_norm=gradient_clipping_threshold)
                 # Update the parameters using the clipped gradients
                 optimizer.step()
 
@@ -227,7 +267,7 @@ def evaluate_model(model, data_loader, loss_fn, optimizer, device, enable_backpr
     avg_loss = total_loss / len(data_loader)
     return avg_loss
 
-def recursive_forecast(model, initial_sequence, forecast_horizon, device):
+def recursive_forecast(model, initial_sequence, forecast_horizon, device, warm_up_data):
     """
     Performs recursive forecasting using the trained GRU model.
 
@@ -244,14 +284,20 @@ def recursive_forecast(model, initial_sequence, forecast_horizon, device):
     current_sequence = initial_sequence.copy()
     forecasts = []
 
+    # Warm-Up Phase
+    model.hidden = None
+    with torch.no_grad():
+        for X_sample, _ in warm_up_data:
+            # Assuming sample is correctly shaped for your model
+            _ = model(X_sample)
+
     for _ in range(forecast_horizon):
         # Convert current sequence to PyTorch tensor
         sequence_tensor = torch.from_numpy(current_sequence).float().view(1, -1, 1).to(device)
 
         # Initialize hidden state and perform forecast
-        h = model.init_hidden(1, device)
         with torch.no_grad():
-            forecast, _ = model(sequence_tensor, h)
+            forecast = model(sequence_tensor)
         
         # Update the sequence with the forecasted value
         forecast_value = forecast.cpu().numpy()
@@ -302,6 +348,7 @@ def forecast_using_gru(input_series, forecast_horizon, batch_size=50, num_layers
     # Format the data as loaders
     train_loader = construct_dataloader(X_train, y_train, batch_size, shuffle=False)
     validation_loader = construct_dataloader(X_validation, y_validation, batch_size, shuffle=False)
+    warm_up_loader = construct_dataloader(X_validation, y_validation, 1, shuffle=False)
 
     # Model Initialization
     model, loss_fn, optimizer = initialize_model(input_size=1, 
@@ -315,11 +362,14 @@ def forecast_using_gru(input_series, forecast_horizon, batch_size=50, num_layers
     model = model.to(device)
 
     # Training
-    model, loss_history = train_model_with_early_stopping(model, train_loader, validation_loader, loss_fn, optimizer, device, num_epochs, patience, gradient_clipping_threshold=gradient_clipping_threshold, l2_lambda=l2_lambda, verbose=verbose)
+    model, loss_history = train_model_with_early_stopping(model, train_loader, validation_loader, loss_fn, optimizer, device, num_epochs, patience, gradient_clipping_threshold=gradient_clipping_threshold, l2_lambda=l2_lambda, verbose=verbose, warm_up_loader=warm_up_loader)
+
+    print("Post training")
+    print(model.hidden)
 
     # Forecasting X[-1] is the last sequence in the training set which we use to initialize the forecasting process
     last_sequence_scaled = scaler.transform(X[-1].reshape(-1, 1)).ravel()
-    forecast_values = recursive_forecast(model, last_sequence_scaled, forecast_horizon, device)
+    forecast_values = recursive_forecast(model, last_sequence_scaled, forecast_horizon, device, warm_up_loader)
 
     # Format as a series with datetime index
     forecasts_as_series = convert_forecasts_to_series(data, forecast_values)
