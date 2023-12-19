@@ -1,62 +1,24 @@
-from config import gru_params, DATA_DIR, RESULTS_DIR
-from utils.utils import construct_GRU_input, split_dataset_and_indices
-from model import train_hierarchical_gru, generate_forecasts 
 import pandas as pd
-import torch
-import numpy as np
+from model.torch_gru import forecast_using_gru
+from model.torch_gru import log_diff
 
-# Load some data
-cpi_data = pd.read_excel(DATA_DIR + '/public_data_april.xlsx', index_col=0)[['C000000', 'SA07']]
+us_data = pd.read_csv(r"C:\Users\beerp\Data\HRNN\cpi_us_dataset.csv", index_col=0)
+us_data.index = pd.to_datetime(us_data.index)
+us_data = us_data[us_data.index.year > 1994]
 
-# Define the training data and convert to appropriate input
-dataset, scaler, index_mapping = construct_GRU_input(cpi_data[['C000000']])
+data_temp = us_data[us_data['Category'] == 'All items']['Price']
 
-# Split the dataset
-train_dataset, test_dataset, train_indices, test_indices = split_dataset_and_indices(dataset, index_mapping, test_pct=0.2)
+# Convert all days to 01
+data_temp.index = data_temp.index.map(lambda x: x.replace(day=1))
 
-# Train model
-trained_model = train_hierarchical_gru(train_dataset, gru_params)
+# Data Preparation
+data = log_diff(data_temp, 1)
 
-forecasts = {}
-for i, tensor in enumerate(test_dataset):
-    initial_sequence = [float(i) for i in list(tensor[0][0].flatten())]
-    forecasted_values = generate_forecasts(trained_model, initial_sequence, 12)
-    # Reshape for inverse_transform and then flatten to get back to 1D
-    forecasted_values_reshaped = scaler.inverse_transform(np.array(forecasted_values).reshape(-1, 1)).flatten()
-    forecasts[test_indices[i]] = forecasted_values_reshaped
+data.loc[:] = [i for i in range(len(data))]
 
-# Convert the forecasts dictionary to a DataFrame
-forecast_df = pd.DataFrame.from_dict(forecasts, orient='index', columns=[f'+{i}' for i in range(0, 12)])
+all_forecasts = []
 
-# If test_indices are datetime, the DataFrame index will be datetime
-forecast_df.index = pd.to_datetime(forecast_df.index)
+forecasts, model, loss = forecast_using_gru(data, 12, batch_size=1, num_layers=2, patience=10, num_epochs=10000, drop_prob=0.0, l2_lambda=0.00, validation_size=0.3, gradient_clipping_threshold=5, verbose=False)
+all_forecasts.append(forecasts)
 
-forecast_df.to_excel(RESULTS_DIR + '/forecasts.xlsx')
-
-true_df = forecast_df.copy()
-
-df_pct_change = cpi_data.pct_change(12)
-
-for i, date in enumerate(test_indices):
-    for col in range(12):
-        if not np.isnan(cpi_data.loc[date+pd.DateOffset(months=col), 'C000000']):
-            true_df.loc[date, f'+{col}'] = df_pct_change.loc[date+pd.DateOffset(months=col), 'C000000']
-        else:
-            true_df.loc[date, f'+{col}'] = np.nan
-
-true_df.to_excel(RESULTS_DIR + '/true.xlsx')
-
-df_RW = true_df.copy()
-df_RW.loc[:, :] = 0
-
-# Calculate the Squared Error
-squared_errors_f = np.where(true_df.isna(), np.nan, (forecast_df - true_df) ** 2)
-squared_errors_f = pd.DataFrame(squared_errors_f, index=forecast_df.index, columns=forecast_df.columns)
-squared_errors_f.to_excel(RESULTS_DIR + '/forecasts_se.xlsx')
-# Calculate the Squared Error
-squared_errors_rw = np.where(true_df.isna(), np.nan, (df_RW - true_df) ** 2)
-squared_errors_rw = pd.DataFrame(squared_errors_rw, index=forecast_df.index, columns=forecast_df.columns)
-#squared_errors_rw.to_excel(RESULTS_DIR + '/rw_se.xlsx')
-
-#train_data, test_data, scaler = preprocess_data(df, 'inflation_rate')
-
+print(all_forecasts)
